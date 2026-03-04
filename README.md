@@ -39,23 +39,52 @@ sudo apt install gimble
 Start Gimble:
 
 ```bash
-Gimble
+gimble
 ```
 
-## Local Chat UI Mock (inside Gimble session)
+## Local Chat (inside Gimble session)
 
-Inside a Gimble session, run:
+`gim chat` now supports real OpenAI responses, but only inside a Gimble session.
+
+### Option A: env vars in current shell
 
 ```bash
-gim chat
+export OPENAI_API_KEY="<your_local_key>"
+export OPENAI_MODEL="gpt-4o-mini"   # optional
+```
+
+### Option B: local config file (recommended)
+
+Create a machine-local file (never committed):
+
+```bash
+mkdir -p "$HOME/Library/Application Support/gimble"   # macOS
+# mkdir -p "$HOME/.config/gimble"                    # Linux
+
+cat > "$HOME/Library/Application Support/gimble/chat.env" <<'ENV'
+OPENAI_API_KEY=<your_local_key>
+OPENAI_MODEL=gpt-4o-mini
+ENV
 ```
 
 Behavior:
 
 - Prefers `http://localhost:5555`
 - If `5555` is busy, Gimble picks any free localhost port
-- Prints the local URL in terminal (click it to open in browser)
-- Opens a ChatGPT-style UI mock page (visual only, no backend or chat actions)
+- Prints a localhost link in terminal (click to open browser)
+- Serves one chat window and one in-memory conversation per server run
+- `new chat` is disabled intentionally
+
+Usage:
+
+```bash
+gimble
+# now inside Gimble session
+
+gim chat
+```
+
+`gimble chat` is intentionally disabled outside session.
 
 ## First Run (Recommended)
 

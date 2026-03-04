@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"embed"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 
+	chatservice "github.com/gimble-dev/gimble/internal/chat"
 	"github.com/gimble-dev/gimble/internal/platform"
 	"github.com/gimble-dev/gimble/internal/profile"
 )
@@ -93,6 +98,27 @@ func runChat(args []string) error {
 		return fmt.Errorf("invalid port: %d", *port)
 	}
 
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+	if apiKey == "" || model == "" {
+		fileKey, fileModel, err := loadLocalChatEnv()
+		if err != nil {
+			return err
+		}
+		if apiKey == "" {
+			apiKey = fileKey
+		}
+		if model == "" {
+			model = fileModel
+		}
+	}
+	if apiKey == "" {
+		path, _ := localChatEnvPath()
+		return fmt.Errorf("OPENAI_API_KEY is not set. Export it locally or set it in %s", path)
+	}
+
+	svc := chatservice.NewService(apiKey, model)
+
 	ln, actualPort, err := listenWithFallback(*port)
 	if err != nil {
 		return err
@@ -104,16 +130,49 @@ func runChat(args []string) error {
 		return fmt.Errorf("failed to load chat UI: %w", err)
 	}
 
+	type chatReq struct {
+		Message string `json:"message"`
+	}
+	type chatResp struct {
+		Reply string `json:"reply,omitempty"`
+		Error string `json:"error,omitempty"`
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(indexBytes)
 	})
+	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		defer r.Body.Close()
+
+		var req chatReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(chatResp{Error: "invalid request body"})
+			return
+		}
+
+		reply, err := svc.Send(context.Background(), req.Message)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(chatResp{Error: err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(chatResp{Reply: reply})
+	})
 
 	url := fmt.Sprintf("http://localhost:%d", actualPort)
-	// Print an OSC 8 hyperlink where supported, with the plain URL as a fallback.
-	// OSC 8 sequence: ESC ] 8 ; ; <url> ESC \\ <text> ESC ] 8 ; ; ESC \\
 	fmt.Printf("Gimble chat UI: %s\n", makeHyperlink(url)+" ("+url+")")
 	fmt.Println("Open this URL in your browser. Press Ctrl+C to stop.")
 
@@ -123,6 +182,58 @@ func runChat(args []string) error {
 	}
 
 	return nil
+}
+
+func localChatEnvPath() (string, error) {
+	cfgDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to determine config dir: %w", err)
+	}
+	return filepath.Join(cfgDir, "gimble", "chat.env"), nil
+}
+
+func loadLocalChatEnv() (apiKey string, model string, err error) {
+	path, err := localChatEnvPath()
+	if err != nil {
+		return "", "", err
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		switch key {
+		case "OPENAI_API_KEY":
+			apiKey = val
+		case "OPENAI_MODEL":
+			model = val
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	return apiKey, model, nil
 }
 
 func listenWithFallback(preferredPort int) (net.Listener, int, error) {
