@@ -46,7 +46,7 @@ brew install gimble
 Then start a session with:
 
 ```bash
-Gimble
+gimble
 ```
 
 ## What happens when you run Gimble
