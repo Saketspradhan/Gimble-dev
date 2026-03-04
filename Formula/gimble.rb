@@ -8,7 +8,8 @@ class Gimble < Formula
   depends_on "go" => :build
 
   def install
-    system "go", "build", "-ldflags", "-X main.version=0.1.2", "-o", bin/"gimble", "./cmd/gimble"
+    system "go", "build", "-ldflags", "-X main.version=0.1.2", "-o", "gimble", "./cmd/gimble"
+    bin.install "gimble"
     bin.install_symlink bin/"gimble" => "Gimble"
   end
 
