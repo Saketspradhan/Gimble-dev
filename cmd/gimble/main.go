@@ -34,11 +34,19 @@ func run(args []string) error {
 		return err
 	}
 
+	inSession := os.Getenv("GIMBLE_SESSION") == "1"
+
+	if inSession && len(args) == 0 {
+		return fmt.Errorf("already inside a Gimble session; use 'exit' to leave")
+	}
+
 	if len(args) == 0 {
 		return runSession()
 	}
 
 	switch args[0] {
+	case "__session_cmd":
+		return runSessionCommand(args[1:])
 	case "--version", "-version", "-v":
 		fmt.Printf("gimble %s\n", version)
 		return nil
@@ -46,13 +54,30 @@ func run(args []string) error {
 		printHelp()
 		return nil
 	case "session":
+		if inSession {
+			return fmt.Errorf("already inside a Gimble session; use 'exit' to leave")
+		}
 		return runSession()
-	case "chat":
-		return runChat(args[1:])
 	case "profile":
 		return runProfile(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], helpText())
+	}
+}
+
+func runSessionCommand(args []string) error {
+	if os.Getenv("GIMBLE_SESSION") != "1" {
+		return fmt.Errorf("session commands are only available inside a Gimble session")
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("missing session subcommand")
+	}
+
+	switch args[0] {
+	case "chat":
+		return runChat(args[1:])
+	default:
+		return fmt.Errorf("unknown session command %q", args[0])
 	}
 }
 
@@ -405,6 +430,9 @@ func runSession() error {
 	cmd.Env = env
 
 	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return nil
+		}
 		return fmt.Errorf("failed to start Gimble session: %w", err)
 	}
 
@@ -422,11 +450,20 @@ func createSessionShimDir() (cleanup func(), shimDir string, err error) {
 		return func() {}, "", err
 	}
 
-	shimScript := fmt.Sprintf("#!/bin/sh\nexec %q \"$@\"\n", exe)
-	shimPath := filepath.Join(dir, "gim")
-	if err := os.WriteFile(shimPath, []byte(shimScript), 0o755); err != nil {
+	gimScript := fmt.Sprintf("#!/bin/sh\nexec %q __session_cmd \"$@\"\n", exe)
+	gimPath := filepath.Join(dir, "gim")
+	if err := os.WriteFile(gimPath, []byte(gimScript), 0o755); err != nil {
 		_ = os.RemoveAll(dir)
 		return func() {}, "", err
+	}
+
+	blockScript := "#!/bin/sh\necho \"Already inside a Gimble session. Use 'exit' to leave.\" 1>&2\nexit 1\n"
+	for _, name := range []string{"gimble", "Gimble"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(blockScript), 0o755); err != nil {
+			_ = os.RemoveAll(dir)
+			return func() {}, "", err
+		}
 	}
 
 	cleanupFn := func() {
@@ -443,7 +480,6 @@ func helpText() string {
 	return `Usage:
   gimble                     Start Gimble shell session
   gimble session             Start Gimble shell session
-  gimble chat                Start ChatGPT-style local chat UI server
   gimble --version           Print version
   gimble profile <command>   Manage Gimble profiles
 

@@ -57,12 +57,6 @@ Behavior:
 - Prints the local URL in terminal (click it to open in browser)
 - Opens a ChatGPT-style UI mock page (visual only, no backend or chat actions)
 
-You can also run it directly:
-
-```bash
-gimble chat
-```
-
 ## First Run (Recommended)
 
 Initialize your profile once:
