@@ -34,13 +34,20 @@ Gimble
 
 Type `exit` to return to your previous shell.
 
-## Install (macOS)
+## Install with Homebrew (macOS)
 
-A Homebrew formula template exists at:
+You can install Gimble directly from this repository as a tap:
 
-- `packaging/homebrew/gimble.rb`
+```bash
+brew tap saketspradhan/gimble https://github.com/Saketspradhan/Gimble-dev
+brew install gimble
+```
 
-Update formula URL + checksums for your release binaries, then users can install with Homebrew.
+Then start a session with:
+
+```bash
+Gimble
+```
 
 ## What happens when you run Gimble
 
