@@ -42,6 +42,27 @@ Start Gimble:
 Gimble
 ```
 
+## Local Chat UI Mock (inside Gimble session)
+
+Inside a Gimble session, run:
+
+```bash
+gim chat
+```
+
+Behavior:
+
+- Prefers `http://localhost:5555`
+- If `5555` is busy, Gimble picks any free localhost port
+- Prints the local URL in terminal (click it to open in browser)
+- Opens a ChatGPT-style UI mock page (visual only, no backend or chat actions)
+
+You can also run it directly:
+
+```bash
+gimble chat
+```
+
 ## First Run (Recommended)
 
 Initialize your profile once:

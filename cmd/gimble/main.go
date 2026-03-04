@@ -1,8 +1,12 @@
 package main
 
 import (
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +18,9 @@ import (
 )
 
 var version = "dev"
+
+//go:embed web/chat/index.html
+var chatAssets embed.FS
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -40,11 +47,80 @@ func run(args []string) error {
 		return nil
 	case "session":
 		return runSession()
+	case "chat":
+		return runChat(args[1:])
 	case "profile":
 		return runProfile(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], helpText())
 	}
+}
+
+func runChat(args []string) error {
+	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	port := fs.Int("port", 5555, "preferred port")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *port < 0 || *port > 65535 {
+		return fmt.Errorf("invalid port: %d", *port)
+	}
+
+	ln, actualPort, err := listenWithFallback(*port)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
+	indexBytes, err := fsReadFile(chatAssets, "web/chat/index.html")
+	if err != nil {
+		return fmt.Errorf("failed to load chat UI: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(indexBytes)
+	})
+
+	url := fmt.Sprintf("http://localhost:%d", actualPort)
+	fmt.Printf("Gimble chat UI: %s\n", url)
+	fmt.Println("Open this URL in your browser. Press Ctrl+C to stop.")
+
+	server := &http.Server{Handler: mux}
+	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("chat server error: %w", err)
+	}
+
+	return nil
+}
+
+func listenWithFallback(preferredPort int) (net.Listener, int, error) {
+	if preferredPort != 0 {
+		addr := fmt.Sprintf("127.0.0.1:%d", preferredPort)
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln, preferredPort, nil
+		}
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to find open port: %w", err)
+	}
+	actual := ln.Addr().(*net.TCPAddr).Port
+	return ln, actual, nil
+}
+
+func fsReadFile(fsys fs.FS, name string) ([]byte, error) {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func runProfile(args []string) error {
@@ -290,6 +366,16 @@ func runSession() error {
 	env := append(os.Environ(), "GIMBLE_SESSION=1")
 	promptPrefix := "gimble"
 
+	cleanup, shimDir, shimErr := createSessionShimDir()
+	if shimErr == nil {
+		if oldPath := os.Getenv("PATH"); oldPath != "" {
+			env = append(env, "PATH="+shimDir+":"+oldPath)
+		} else {
+			env = append(env, "PATH="+shimDir)
+		}
+		defer cleanup()
+	}
+
 	if activeName, p, ok := cfg.Active(); ok {
 		env = append(env,
 			"GIMBLE_PROFILE="+activeName,
@@ -307,7 +393,7 @@ func runSession() error {
 	shellName := filepath.Base(shell)
 	switch shellName {
 	case "bash":
-		env = append(env, fmt.Sprintf("PS1=(%s) ${PS1:-\\u@\\h:\\w\\$ }", promptPrefix))
+		env = append(env, fmt.Sprintf("PS1=(%s) \\u@\\h:\\w\\$ ", promptPrefix))
 	case "zsh":
 		env = append(env, fmt.Sprintf("PROMPT=(%s) %%n@%%m:%%~%%# ", promptPrefix))
 	}
@@ -325,6 +411,30 @@ func runSession() error {
 	return nil
 }
 
+func createSessionShimDir() (cleanup func(), shimDir string, err error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return func() {}, "", err
+	}
+
+	dir, err := os.MkdirTemp("", "gimble-shim-*")
+	if err != nil {
+		return func() {}, "", err
+	}
+
+	shimScript := fmt.Sprintf("#!/bin/sh\nexec %q \"$@\"\n", exe)
+	shimPath := filepath.Join(dir, "gim")
+	if err := os.WriteFile(shimPath, []byte(shimScript), 0o755); err != nil {
+		_ = os.RemoveAll(dir)
+		return func() {}, "", err
+	}
+
+	cleanupFn := func() {
+		_ = os.RemoveAll(dir)
+	}
+	return cleanupFn, dir, nil
+}
+
 func printHelp() {
 	fmt.Print(helpText())
 }
@@ -333,8 +443,12 @@ func helpText() string {
 	return `Usage:
   gimble                     Start Gimble shell session
   gimble session             Start Gimble shell session
+  gimble chat                Start ChatGPT-style local chat UI server
   gimble --version           Print version
   gimble profile <command>   Manage Gimble profiles
+
+Inside a Gimble session, use:
+  gim chat                   Start ChatGPT-style local chat UI server
 
 Profile Commands:
   gimble profile init --name <name> --email <email> --github <github> [--profile <name>]
