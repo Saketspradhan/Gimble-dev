@@ -1,0 +1,81 @@
+name: Publish APT Repository
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (example: 0.2.1). Ignored when triggered by a tag push.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish-apt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      - name: Resolve version
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Linux packages
+        run: make package-deb VERSION=${{ steps.vars.outputs.version }}
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gimble-deb-${{ steps.vars.outputs.version }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Build APT repo structure
+        run: |
+          ./scripts/apt/build-repo.sh "${{ steps.vars.outputs.version }}" apt-repo
+
+      - name: Sign APT metadata
+        env:
+          GPG_PRIVATE_KEY_B64: ${{ secrets.APT_GPG_PRIVATE_KEY_B64 }}
+          GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          ./scripts/apt/sign-repo.sh apt-repo
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./apt-repo
+          force_orphan: true
+
+      - name: Create GitHub release with debs
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
