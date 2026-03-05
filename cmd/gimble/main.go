@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +94,7 @@ func runSessionCommand(args []string) error {
 func runPythonChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	port := fs.Int("port", 5555, "preferred port")
+	port := fs.Int("port", 0, "preferred port (0 for auto)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -114,6 +115,10 @@ func runPythonChat(args []string) error {
 		return err
 	}
 
+	if err := ensurePythonChatRuntime(pythonExe, scriptPath); err != nil {
+		return err
+	}
+
 	ln, actualPort, err := listenWithFallback(*port)
 	if err != nil {
 		return err
@@ -128,7 +133,7 @@ func runPythonChat(args []string) error {
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	logFile, _, err := openChatServerLogFile()
+	logFile, logPath, err := openChatServerLogFile()
 	if err != nil {
 		return err
 	}
@@ -139,11 +144,17 @@ func runPythonChat(args []string) error {
 		_ = logFile.Close()
 		return fmt.Errorf("failed to start python chat server: %w", err)
 	}
-	if err := saveChatServerState(cmd.Process.Pid); err != nil {
+	pid := cmd.Process.Pid
+	if err := saveChatServerState(pid); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to persist chat server state: %v\n", err)
 	}
 	_ = cmd.Process.Release()
 	_ = logFile.Close()
+
+	if err := waitForChatServerReady(actualPort, pid, 5*time.Second); err != nil {
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		return fmt.Errorf("chat server failed to start: %w\nCheck logs: %s\nIf needed, run: %s", err, logPath, runtimeSetupHint(scriptPath))
+	}
 
 	fmt.Printf("Gimble Chat and Ask agents are running in the background. Chat with Gimble at %s or %s\n", makeHyperlink(loopbackURL), makeHyperlink(localhostURL))
 
@@ -259,6 +270,66 @@ func openChatServerLogFile() (*os.File, string, error) {
 		return nil, "", fmt.Errorf("failed to initialize log file: %w", err)
 	}
 	return f, logPath, nil
+}
+
+func waitForChatServerReady(port int, pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+				return nil
+			}
+		}
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			return fmt.Errorf("python server process exited early")
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	return fmt.Errorf("server did not become ready on time")
+}
+
+func ensurePythonChatRuntime(pythonExe string, scriptPath string) error {
+	if err := checkPythonRuntimeImports(pythonExe); err == nil {
+		return nil
+	}
+
+	setupScript := filepath.Join(filepath.Dir(scriptPath), "setup_runtime.sh")
+	if _, err := os.Stat(setupScript); err == nil {
+		fmt.Println("Python chat runtime missing; installing required packages now...")
+		cmd := exec.Command("sh", setupScript)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to auto-install chat runtime: %w", err)
+		}
+	}
+
+	if err := checkPythonRuntimeImports(pythonExe); err != nil {
+		return fmt.Errorf("python chat runtime is not ready: %w\nRun: %s", err, runtimeSetupHint(scriptPath))
+	}
+	return nil
+}
+
+func checkPythonRuntimeImports(pythonExe string) error {
+	cmd := exec.Command(pythonExe, "-c", "import flask, waitress")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(out))
+		if trimmed == "" {
+			trimmed = err.Error()
+		}
+		return fmt.Errorf(trimmed)
+	}
+	return nil
+}
+
+func runtimeSetupHint(scriptPath string) string {
+	setupScript := filepath.Join(filepath.Dir(scriptPath), "setup_runtime.sh")
+	return setupScript
 }
 
 func findPythonInterpreter() (string, error) {
@@ -933,7 +1004,16 @@ func runSession() error {
 		env = append(env, fmt.Sprintf("PROMPT=(%s) %%n@%%m:%%~%%# ", promptPrefix))
 	}
 
-	cmd := exec.Command(shell, "-i")
+	logPath, err := prepareSessionLogPath()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Session logging enabled: %s\n", logPath)
+
+	cmd, err := newLoggedShellCommand(shell, logPath)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -947,6 +1027,39 @@ func runSession() error {
 	}
 
 	return nil
+}
+
+func prepareSessionLogPath() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve user config dir for session logs: %w", err)
+	}
+	dir := filepath.Join(base, "gimble", "session-logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create session log dir: %w", err)
+	}
+	name := "session-" + time.Now().Format("20060102-150405") + ".log"
+	path := filepath.Join(dir, name)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("failed to create session log file: %w", err)
+	}
+	_ = f.Close()
+	latest := filepath.Join(dir, "session-latest.log")
+	_ = os.Remove(latest)
+	_ = os.Symlink(name, latest)
+	return path, nil
+}
+
+func newLoggedShellCommand(shell string, logPath string) (*exec.Cmd, error) {
+	scriptBin, err := exec.LookPath("script")
+	if err != nil {
+		return nil, fmt.Errorf("terminal logger 'script' not found; install util-linux (Linux) or BSD script (macOS)")
+	}
+	if runtime.GOOS == "darwin" {
+		return exec.Command(scriptBin, "-q", "-F", logPath, shell, "-i"), nil
+	}
+	return exec.Command(scriptBin, "-q", "-F", logPath, "-c", shell+" -i"), nil
 }
 
 func createSessionShimDir() (cleanup func(), shimDir string, err error) {

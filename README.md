@@ -46,6 +46,8 @@ gimble
 
 `gim chat` runs a **Python** backend with two primary providers: **Groq** and **OpenAI API**.
 
+When runtime dependencies are missing, Gimble auto-installs the Python chat runtime and only prints the chat URL after the server is actually reachable.
+
 Default selection:
 
 - `openai/gpt-oss-120b` via Groq
@@ -105,6 +107,9 @@ gimble
 
 gim chat
 ```
+
+By default, `gim chat` uses an automatically selected open localhost port.
+Use `gim chat --port <port>` only when you want to pin a specific port.
 
 ### System prompt support
 
@@ -229,8 +234,8 @@ Key setup details:
 Publish a release:
 
 ```bash
-git tag v0.1.12
-git push origin v0.1.12
+git tag v0.1.13
+git push origin v0.1.13
 ```
 
 ## Updating Gimble
