@@ -263,7 +263,7 @@
           <textarea id="input" placeholder="Message Gimble"></textarea>
           <button id="send" class="send">↑</button>
         </div>
-        <div class="footnote">Default on Apple Silicon: GPT-Q 4K local model. Switch models from the top-right dropdown.</div>
+        <div class="footnote">Default: openai/gpt-oss-120b via Groq. GPT-Q 4K is experimental only.</div>
       </footer>
     </main>
   </div>
@@ -276,7 +276,7 @@
     const statusEl = document.getElementById('status');
     const modelEl = document.getElementById('model');
 
-    let activeModel = 'gptq4k';
+    let activeModel = 'groq:openai/gpt-oss-120b';
 
     function appendMessage(role, text, isError = false) {
       const row = document.createElement('div');
@@ -308,7 +308,7 @@
       try {
         const res = await fetch('/api/models');
         const data = await res.json();
-        const defaultKey = data.default || 'llama';
+        const defaultKey = data.default || 'groq:openai/gpt-oss-120b';
         modelEl.innerHTML = '';
 
         for (const m of data.models || []) {

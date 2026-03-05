@@ -2,6 +2,8 @@
 import argparse
 import os
 import platform
+import shutil
+import tempfile
 import threading
 import urllib.request
 from pathlib import Path
@@ -19,15 +21,29 @@ except ModuleNotFoundError as exc:
 
 
 DEFAULT_SYSTEM_PROMPT = "You are Gimble Assistant. Be concise, practical, and clear."
-DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 REQ_FILE = Path(__file__).resolve().parent / "requirements.txt"
-DEFAULT_GPTQ4K_LABEL = "GPT-Q 4K (Local CPU)"
-DEFAULT_LLAMA_LABEL = "LLaMA 3 7B (Local CPU)"
-DEFAULT_OPENAI_LABEL = "GPT-4 (OpenAI API)"
 
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-safeguard-20b",
+    "qwen/qwen3-32b",
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+]
 
-# Default GPT-Q 4K path required by the product requirement.
-# We use a quantized GGUF artifact and store it with this canonical filename.
+OPENAI_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+]
+
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL_KEY = f"groq:{DEFAULT_GROQ_MODEL}"
+
+EXPERIMENTAL_GPTQ_KEY = "local:gptq-4k-experimental"
+EXPERIMENTAL_GPTQ_LABEL = "GPT-Q 4K (Experimental, developer-only)"
 DEFAULT_GPTQ4K_FILE = "gptq-4k-quantized.gguf"
 DEFAULT_GPTQ4K_URL = (
     "https://huggingface.co/bartowski/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/"
@@ -62,19 +78,6 @@ def load_chat_env() -> Dict[str, str]:
     return values
 
 
-def is_apple_silicon() -> bool:
-    return platform.system().lower() == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}
-
-
-def resolve_default_model() -> str:
-    explicit = os.getenv("GIMBLE_DEFAULT_MODEL", "").strip().lower()
-    if explicit in {"gptq4k", "llama", "gpt4"}:
-        return explicit
-    if is_apple_silicon():
-        return "gptq4k"
-    return "llama"
-
-
 def split_system_prefix(text: str) -> Tuple[str, str]:
     stripped = text.strip()
     if not stripped.lower().startswith("system:"):
@@ -86,6 +89,17 @@ def split_system_prefix(text: str) -> Tuple[str, str]:
     if user_text.lower().startswith("user:"):
         user_text = user_text[len("User:") :].strip()
     return system_prompt, user_text
+
+
+def is_valid_gguf(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 4:
+        return False
+    try:
+        with path.open("rb") as f:
+            magic = f.read(4)
+        return magic == b"GGUF"
+    except OSError:
+        return False
 
 
 class ConversationStore:
@@ -123,77 +137,51 @@ class ConversationStore:
 
 
 class LlamaCppBackend:
-    def __init__(
-        self,
-        *,
-        label: str,
-        model_path: Path,
-        auto_download: bool,
-        hf_repo: str,
-        hf_file: str,
-        direct_url: str,
-        n_ctx: int,
-        n_threads: int,
-    ) -> None:
-        self.label = label
+    def __init__(self, *, model_path: Path, auto_download: bool, direct_url: str, n_ctx: int, n_threads: int) -> None:
         self.model_path = model_path
         self.auto_download = auto_download
-        self.hf_repo = hf_repo
-        self.hf_file = hf_file
         self.direct_url = direct_url
         self.n_ctx = n_ctx
         self.n_threads = n_threads
-
         self._lock = threading.Lock()
         self._llm = None
 
     def available(self) -> bool:
         return self.model_path.exists() or self.auto_download
 
-    def _download_via_hf(self) -> bool:
-        if not self.hf_repo or not self.hf_file:
-            return False
-        try:
-            from huggingface_hub import hf_hub_download
-        except ModuleNotFoundError:
-            raise RuntimeError(f"huggingface-hub is required. Run: python3 -m pip install -r {REQ_FILE}")
-
-        downloaded = hf_hub_download(
-            repo_id=self.hf_repo,
-            filename=self.hf_file,
-            local_dir=str(self.model_path.parent),
-            local_dir_use_symlinks=False,
-        )
-        downloaded_path = Path(downloaded)
-        if downloaded_path != self.model_path:
-            downloaded_path.replace(self.model_path)
-        return True
-
     def _download_via_url(self) -> bool:
         if not self.direct_url:
             return False
-        with urllib.request.urlopen(self.direct_url) as src, self.model_path.open("wb") as dst:
-            dst.write(src.read())
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            with urllib.request.urlopen(self.direct_url) as src, tmp_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            shutil.move(str(tmp_path), str(self.model_path))
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
         return True
 
     def _ensure_model_file(self) -> None:
-        if self.model_path.exists():
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.model_path.exists() and not is_valid_gguf(self.model_path):
+            self.model_path.unlink(missing_ok=True)
+
+        if is_valid_gguf(self.model_path):
             return
+
         if not self.auto_download:
             raise RuntimeError(f"Model missing at {self.model_path}")
 
-        self.model_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading model for {self.label} ...")
-        try:
-            if self._download_via_hf():
-                return
-        except Exception as exc:  # noqa: BLE001
-            print(f"HF download failed for {self.label}: {exc}")
-        if self._download_via_url():
+        if self._download_via_url() and is_valid_gguf(self.model_path):
             return
 
+        self.model_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"Could not download {self.label}. Set model path directly with env var or configure download source."
+            f"Could not acquire a valid GGUF model for {EXPERIMENTAL_GPTQ_LABEL}. "
+            f"Set {self.model_path} manually or configure GIMBLE_GPTQ4K_URL."
         )
 
     def _ensure_loaded(self):
@@ -207,7 +195,6 @@ class LlamaCppBackend:
             except ModuleNotFoundError:
                 raise RuntimeError(f"llama-cpp-python is required. Run: python3 -m pip install -r {REQ_FILE}")
 
-            print(f"Loading {self.label} from {self.model_path} ...")
             self._llm = Llama(
                 model_path=str(self.model_path),
                 n_ctx=self.n_ctx,
@@ -227,20 +214,19 @@ class LlamaCppBackend:
             )
             return (result["choices"][0]["message"]["content"] or "").strip() or "(empty response)"
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"{self.label} inference error: {exc}")
+            raise RuntimeError(f"{EXPERIMENTAL_GPTQ_LABEL} inference error: {exc}")
 
 
 class OpenAIBackend:
     def __init__(self) -> None:
         env = load_chat_env()
         self.api_key = os.getenv("OPENAI_API_KEY", env.get("OPENAI_API_KEY", "")).strip()
-        self.model = os.getenv("OPENAI_MODEL", env.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)).strip() or DEFAULT_OPENAI_MODEL
-        self.label = DEFAULT_OPENAI_LABEL
+        self.default_model = os.getenv("OPENAI_MODEL", env.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)).strip() or DEFAULT_OPENAI_MODEL
 
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, messages: List[Dict[str, str]]) -> str:
+    def chat(self, messages: List[Dict[str, str]], model: str) -> str:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured. Set it in env or gimble chat.env")
         try:
@@ -249,9 +235,10 @@ class OpenAIBackend:
             raise RuntimeError(f"openai package is required. Run: python3 -m pip install -r {REQ_FILE}")
 
         client = OpenAI(api_key=self.api_key)
+        target_model = model or self.default_model
         try:
             response = client.chat.completions.create(
-                model=self.model,
+                model=target_model,
                 messages=messages,
                 temperature=0.7,
             )
@@ -261,47 +248,96 @@ class OpenAIBackend:
             raise RuntimeError(f"OpenAI API error: {exc}")
 
 
+class GroqBackend:
+    def __init__(self) -> None:
+        env = load_chat_env()
+        self.api_key = os.getenv("GROQ_API_KEY", env.get("GROQ_API_KEY", "")).strip()
+        self.default_model = os.getenv("GROQ_MODEL", env.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)).strip() or DEFAULT_GROQ_MODEL
+
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    def chat(self, messages: List[Dict[str, str]], model: str) -> str:
+        if not self.api_key:
+            raise RuntimeError("GROQ_API_KEY is not configured. Set it in env or gimble chat.env")
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError:
+            raise RuntimeError(f"openai package is required. Run: python3 -m pip install -r {REQ_FILE}")
+
+        client = OpenAI(api_key=self.api_key, base_url="https://api.groq.com/openai/v1")
+        target_model = model or self.default_model
+        try:
+            response = client.chat.completions.create(
+                model=target_model,
+                messages=messages,
+                temperature=0.7,
+            )
+            text = response.choices[0].message.content or ""
+            return text.strip() or "(empty response)"
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Groq API error: {exc}")
+
+
+def parse_model_key(model_key: str) -> Tuple[str, str]:
+    provider, _, model = model_key.partition(":")
+    if not provider or not model:
+        return "", ""
+    return provider, model
+
+
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=str(Path(__file__).resolve().parent / "web"), static_url_path="")
 
-    cache_dir = Path(os.getenv("GIMBLE_MODEL_CACHE_DIR", Path.home() / ".cache" / "gimble" / "models"))
-    n_ctx = int(os.getenv("GIMBLE_LLAMA_N_CTX", "2048"))
-    n_threads = int(os.getenv("GIMBLE_LLAMA_THREADS", str(max((os.cpu_count() or 2) - 1, 1))))
-
-    gptq4k = LlamaCppBackend(
-        label=DEFAULT_GPTQ4K_LABEL,
-        model_path=Path(os.getenv("GIMBLE_GPTQ4K_MODEL_PATH", cache_dir / DEFAULT_GPTQ4K_FILE)),
+    openai_backend = OpenAIBackend()
+    groq_backend = GroqBackend()
+    gptq_backend = LlamaCppBackend(
+        model_path=Path(os.getenv("GIMBLE_GPTQ4K_MODEL_PATH", Path.home() / ".cache" / "gimble" / "models" / DEFAULT_GPTQ4K_FILE)),
         auto_download=os.getenv("GIMBLE_GPTQ4K_AUTO_DOWNLOAD", "1") == "1",
-        hf_repo=os.getenv("GIMBLE_GPTQ4K_HF_REPO", ""),
-        hf_file=os.getenv("GIMBLE_GPTQ4K_HF_FILE", ""),
         direct_url=os.getenv("GIMBLE_GPTQ4K_URL", DEFAULT_GPTQ4K_URL),
-        n_ctx=n_ctx,
-        n_threads=n_threads,
+        n_ctx=int(os.getenv("GIMBLE_LLAMA_N_CTX", "2048")),
+        n_threads=int(os.getenv("GIMBLE_LLAMA_THREADS", str(max((os.cpu_count() or 2) - 1, 1)))),
     )
 
-    llama = LlamaCppBackend(
-        label=DEFAULT_LLAMA_LABEL,
-        model_path=Path(os.getenv("GIMBLE_LLAMA_MODEL_PATH", cache_dir / "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")),
-        auto_download=os.getenv("GIMBLE_LLAMA_AUTO_DOWNLOAD", "1") == "1",
-        hf_repo=os.getenv("GIMBLE_LLAMA_HF_REPO", "bartowski/Meta-Llama-3-8B-Instruct-GGUF"),
-        hf_file=os.getenv("GIMBLE_LLAMA_HF_FILE", "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"),
-        direct_url=os.getenv("GIMBLE_LLAMA_URL", ""),
-        n_ctx=n_ctx,
-        n_threads=n_threads,
+    model_options = []
+    for model in GROQ_MODELS:
+        model_options.append(
+            {
+                "key": f"groq:{model}",
+                "label": model,
+                "available": groq_backend.available(),
+                "provider": "groq",
+            }
+        )
+    for model in OPENAI_MODELS:
+        model_options.append(
+            {
+                "key": f"openai:{model}",
+                "label": model,
+                "available": openai_backend.available(),
+                "provider": "openai",
+            }
+        )
+
+    model_options.append(
+        {
+            "key": EXPERIMENTAL_GPTQ_KEY,
+            "label": EXPERIMENTAL_GPTQ_LABEL,
+            "available": gptq_backend.available(),
+            "provider": "local",
+        }
     )
 
-    gpt4 = OpenAIBackend()
+    valid_keys = [m["key"] for m in model_options]
+    available_keys = [m["key"] for m in model_options if m["available"]]
 
-    model_registry = {
-        "gptq4k": gptq4k,
-        "llama": llama,
-        "gpt4": gpt4,
-    }
-    default_model = resolve_default_model()
-    if not model_registry[default_model].available():
-        default_model = "llama" if model_registry["llama"].available() else "gpt4"
+    default_key = os.getenv("GIMBLE_DEFAULT_MODEL", DEFAULT_MODEL_KEY).strip()
+    if default_key not in valid_keys:
+        default_key = DEFAULT_MODEL_KEY
+    if default_key not in available_keys and available_keys:
+        default_key = available_keys[0]
 
-    store = ConversationStore(list(model_registry.keys()))
+    store = ConversationStore(valid_keys)
 
     @app.get("/")
     def index():
@@ -309,26 +345,19 @@ def create_app() -> Flask:
 
     @app.get("/api/models")
     def models():
-        return jsonify(
-            {
-                "default": default_model,
-                "models": [
-                    {"key": "gptq4k", "label": gptq4k.label, "available": gptq4k.available()},
-                    {"key": "llama", "label": llama.label, "available": llama.available()},
-                    {"key": "gpt4", "label": gpt4.label, "available": gpt4.available()},
-                ],
-            }
-        )
+        return jsonify({"default": default_key, "models": model_options})
 
     @app.post("/api/chat")
     def chat():
         payload = request.get_json(silent=True) or {}
         raw_text = (payload.get("message") or "").strip()
-        model_key = (payload.get("model") or default_model).strip()
+        model_key = (payload.get("model") or default_key).strip()
         explicit_system = (payload.get("system_prompt") or "").strip()
 
-        if model_key not in model_registry:
+        if model_key not in valid_keys:
             return jsonify({"error": f"unknown model: {model_key}"}), 400
+
+        provider, model_name = parse_model_key(model_key)
 
         prefixed_system, user_text = split_system_prefix(raw_text)
         system_prompt = explicit_system or prefixed_system
@@ -342,9 +371,15 @@ def create_app() -> Flask:
             return jsonify({"error": "message cannot be empty"}), 400
 
         history = store.append_user(model_key, user_text)
-        backend = model_registry[model_key]
         try:
-            reply = backend.chat(history)
+            if provider == "groq":
+                reply = groq_backend.chat(history, model_name)
+            elif provider == "openai":
+                reply = openai_backend.chat(history, model_name)
+            elif model_key == EXPERIMENTAL_GPTQ_KEY:
+                reply = gptq_backend.chat(history)
+            else:
+                return jsonify({"error": f"unsupported provider: {provider}"}), 400
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": str(exc)}), 502
 
