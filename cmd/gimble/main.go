@@ -1062,9 +1062,13 @@ func findSessionLogSanitizerScript() (string, error) {
 	exePath, _ := os.Executable()
 	exeDir := filepath.Dir(exePath)
 	candidates := []string{
+		filepath.Join("python", "session_logging", "sanitizer.py"),
 		filepath.Join("python", "session_log_sanitizer.py"),
+		filepath.Join(exeDir, "..", "share", "gimble", "python", "session_logging", "sanitizer.py"),
 		filepath.Join(exeDir, "..", "share", "gimble", "python", "session_log_sanitizer.py"),
+		filepath.Join(exeDir, "python", "session_logging", "sanitizer.py"),
 		filepath.Join(exeDir, "python", "session_log_sanitizer.py"),
+		filepath.Join(exeDir, "..", "python", "session_logging", "sanitizer.py"),
 		filepath.Join(exeDir, "..", "python", "session_log_sanitizer.py"),
 	}
 	for _, candidate := range candidates {
