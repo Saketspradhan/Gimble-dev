@@ -44,9 +44,12 @@ gimble
 
 ## Local Chat (inside Gimble session)
 
-`gim chat` now runs a **Python** backend and supports model switching in the browser:
+`gim chat` runs a **Python + llama.cpp** backend and supports model switching in the browser.
 
-- `LLaMA 3 7B (Local CPU)` (default)
+Available models:
+
+- `GPT-Q 4K (Local CPU)` (default on Apple Silicon Macs)
+- `LLaMA 3 7B (Local CPU)`
 - `GPT-4 (OpenAI API)`
 
 ### 1. Install the Gimble Python runtime (one-time)
@@ -62,7 +65,7 @@ This creates a dedicated virtualenv:
 - macOS: `~/Library/Application Support/gimble/pyenv`
 - Linux: `~/.config/gimble/pyenv`
 
-### 2. Configure OpenAI key (optional, for GPT-4 option)
+### 2. Configure optional OpenAI key (for GPT-4 option)
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/gimble"   # macOS
@@ -74,7 +77,23 @@ OPENAI_MODEL=gpt-4
 ENV
 ```
 
-### 3. Start chat
+### 3. Configure GPT-Q 4K model file/source (optional overrides)
+
+By default, Gimble stores GPT-Q 4K at:
+
+- `~/.cache/gimble/models/gptq-4k-quantized.gguf`
+
+Override with env vars if needed:
+
+```bash
+export GIMBLE_GPTQ4K_MODEL_PATH="$HOME/.cache/gimble/models/gptq-4k-quantized.gguf"
+export GIMBLE_GPTQ4K_URL="<direct-download-url>"
+# optional HF source
+export GIMBLE_GPTQ4K_HF_REPO="<repo>"
+export GIMBLE_GPTQ4K_HF_FILE="gptq-4k-quantized.gguf"
+```
+
+### 4. Start chat
 
 ```bash
 gimble
@@ -85,12 +104,31 @@ gim chat
 
 Behavior:
 
-- Default model in UI is local LLaMA
-- LLaMA model file is auto-downloaded on first local use (GGUF quantized CPU-friendly build)
-- If port `5555` is busy, Gimble uses another free localhost port
-- Single-window, single-session conversation UI (new chat disabled)
+- On Apple Silicon, default selection is `GPT-Q 4K` for CPU-first inference.
+- If no model is selected, backend default is `gptq4k` on Apple Silicon, else `llama`.
+- Models run through llama.cpp (`llama-cpp-python`) for local inference.
+- If port `5555` is busy, Gimble uses another free localhost port.
+- Single-window, single-session conversation UI (new chat disabled).
 
-Model selection happens in the top-right dropdown in the browser UI.
+### System prompt support
+
+You can set explicit system prompts in two ways:
+
+1. API field `system_prompt` in `/api/chat` payload.
+2. Message prefix in chat input:
+
+```text
+System: You are terse and technical.
+User: Explain mmap in one paragraph.
+```
+
+A `System: ...` prompt is persisted per selected model session and honored for future turns.
+
+### Adding model options in UI/code
+
+1. Add backend entry in `python/chat_server.py` inside `model_registry`.
+2. Return it from `/api/models` with `key`, `label`, `available`.
+3. UI (`python/web/index.html`) automatically renders options from `/api/models`.
 
 `gimble chat` is intentionally disabled outside session.
 

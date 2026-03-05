@@ -1,32 +1,45 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import platform
 import threading
+import urllib.request
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 try:
     from flask import Flask, jsonify, request, send_from_directory
 except ModuleNotFoundError as exc:
     missing = str(exc).split("'")[-2] if "'" in str(exc) else "flask"
+    req_file = Path(__file__).resolve().parent / "requirements.txt"
     print(f"Missing Python package: {missing}")
     print("Install dependencies with:")
-    print("  python3 -m pip install -r " + str((Path(__file__).resolve().parent / "requirements.txt")))
+    print(f"  python3 -m pip install -r {req_file}")
     raise SystemExit(1)
 
 
 DEFAULT_SYSTEM_PROMPT = "You are Gimble Assistant. Be concise, practical, and clear."
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 REQ_FILE = Path(__file__).resolve().parent / "requirements.txt"
+DEFAULT_GPTQ4K_LABEL = "GPT-Q 4K (Local CPU)"
 DEFAULT_LLAMA_LABEL = "LLaMA 3 7B (Local CPU)"
 DEFAULT_OPENAI_LABEL = "GPT-4 (OpenAI API)"
+
+
+# Default GPT-Q 4K path required by the product requirement.
+# We use a quantized GGUF artifact and store it with this canonical filename.
+DEFAULT_GPTQ4K_FILE = "gptq-4k-quantized.gguf"
+DEFAULT_GPTQ4K_URL = (
+    "https://huggingface.co/bartowski/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/"
+    "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
+)
 
 
 def chat_env_path() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home()))
         return base / "gimble" / "chat.env"
-    if os.uname().sysname.lower() == "darwin":
+    if platform.system().lower() == "darwin":
         return Path.home() / "Library" / "Application Support" / "gimble" / "chat.env"
     return Path.home() / ".config" / "gimble" / "chat.env"
 
@@ -49,13 +62,48 @@ def load_chat_env() -> Dict[str, str]:
     return values
 
 
+def is_apple_silicon() -> bool:
+    return platform.system().lower() == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+
+
+def resolve_default_model() -> str:
+    explicit = os.getenv("GIMBLE_DEFAULT_MODEL", "").strip().lower()
+    if explicit in {"gptq4k", "llama", "gpt4"}:
+        return explicit
+    if is_apple_silicon():
+        return "gptq4k"
+    return "llama"
+
+
+def split_system_prefix(text: str) -> Tuple[str, str]:
+    stripped = text.strip()
+    if not stripped.lower().startswith("system:"):
+        return "", text
+
+    first_line, _, tail = stripped.partition("\n")
+    system_prompt = first_line[len("System:") :].strip()
+    user_text = tail.strip()
+    if user_text.lower().startswith("user:"):
+        user_text = user_text[len("User:") :].strip()
+    return system_prompt, user_text
+
+
 class ConversationStore:
-    def __init__(self) -> None:
+    def __init__(self, model_keys: List[str]) -> None:
         self._lock = threading.Lock()
         self._messages: Dict[str, List[Dict[str, str]]] = {
-            "llama": [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}],
-            "gpt4": [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}],
+            key: [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}] for key in model_keys
         }
+
+    def set_system_prompt(self, model_key: str, prompt: str) -> None:
+        prompt = prompt.strip()
+        if not prompt:
+            return
+        with self._lock:
+            current = self._messages[model_key]
+            remainder = [m for m in current[1:] if m.get("role") != "system"]
+            self._messages[model_key] = [{"role": "system", "content": prompt}] + remainder
+            self._trim(model_key)
 
     def append_user(self, model_key: str, text: str) -> List[Dict[str, str]]:
         with self._lock:
@@ -69,72 +117,97 @@ class ConversationStore:
             self._trim(model_key)
 
     def _trim(self, model_key: str) -> None:
-        # Keep system + recent turns to limit CPU/memory usage.
         msgs = self._messages[model_key]
         if len(msgs) > 31:
             self._messages[model_key] = [msgs[0]] + msgs[-30:]
 
 
-class LlamaBackend:
-    def __init__(self) -> None:
-        self.label = DEFAULT_LLAMA_LABEL
-        cache_dir = Path(os.getenv("GIMBLE_LLAMA_CACHE_DIR", Path.home() / ".cache" / "gimble" / "models"))
-        self.model_path = Path(
-            os.getenv(
-                "GIMBLE_LLAMA_MODEL_PATH",
-                cache_dir / "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf",
-            )
-        )
-        self.repo_id = os.getenv("GIMBLE_LLAMA_HF_REPO", "bartowski/Meta-Llama-3-8B-Instruct-GGUF")
-        self.repo_file = os.getenv("GIMBLE_LLAMA_HF_FILE", "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")
-        self.auto_download = os.getenv("GIMBLE_LLAMA_AUTO_DOWNLOAD", "1") == "1"
-        self.n_ctx = int(os.getenv("GIMBLE_LLAMA_N_CTX", "2048"))
-        self.n_threads = int(os.getenv("GIMBLE_LLAMA_THREADS", str(max((os.cpu_count() or 2) - 1, 1))))
+class LlamaCppBackend:
+    def __init__(
+        self,
+        *,
+        label: str,
+        model_path: Path,
+        auto_download: bool,
+        hf_repo: str,
+        hf_file: str,
+        direct_url: str,
+        n_ctx: int,
+        n_threads: int,
+    ) -> None:
+        self.label = label
+        self.model_path = model_path
+        self.auto_download = auto_download
+        self.hf_repo = hf_repo
+        self.hf_file = hf_file
+        self.direct_url = direct_url
+        self.n_ctx = n_ctx
+        self.n_threads = n_threads
 
         self._lock = threading.Lock()
         self._llm = None
 
     def available(self) -> bool:
-        return True
+        return self.model_path.exists() or self.auto_download
 
-    def _ensure_model_file(self) -> None:
-        if self.model_path.exists():
-            return
-        if not self.auto_download:
-            raise RuntimeError(
-                f"LLaMA model missing at {self.model_path}. Set GIMBLE_LLAMA_AUTO_DOWNLOAD=1 or place a GGUF there."
-            )
-        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+    def _download_via_hf(self) -> bool:
+        if not self.hf_repo or not self.hf_file:
+            return False
         try:
             from huggingface_hub import hf_hub_download
         except ModuleNotFoundError:
-            raise RuntimeError(
-                f"huggingface-hub is required for auto-download. Run: python3 -m pip install -r {REQ_FILE}"
-            )
+            raise RuntimeError(f"huggingface-hub is required. Run: python3 -m pip install -r {REQ_FILE}")
 
-        print(f"Downloading local model {self.repo_id}/{self.repo_file} ...")
         downloaded = hf_hub_download(
-            repo_id=self.repo_id,
-            filename=self.repo_file,
+            repo_id=self.hf_repo,
+            filename=self.hf_file,
             local_dir=str(self.model_path.parent),
             local_dir_use_symlinks=False,
         )
         downloaded_path = Path(downloaded)
         if downloaded_path != self.model_path:
             downloaded_path.replace(self.model_path)
+        return True
+
+    def _download_via_url(self) -> bool:
+        if not self.direct_url:
+            return False
+        with urllib.request.urlopen(self.direct_url) as src, self.model_path.open("wb") as dst:
+            dst.write(src.read())
+        return True
+
+    def _ensure_model_file(self) -> None:
+        if self.model_path.exists():
+            return
+        if not self.auto_download:
+            raise RuntimeError(f"Model missing at {self.model_path}")
+
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Downloading model for {self.label} ...")
+        try:
+            if self._download_via_hf():
+                return
+        except Exception as exc:  # noqa: BLE001
+            print(f"HF download failed for {self.label}: {exc}")
+        if self._download_via_url():
+            return
+
+        raise RuntimeError(
+            f"Could not download {self.label}. Set model path directly with env var or configure download source."
+        )
 
     def _ensure_loaded(self):
         with self._lock:
             if self._llm is not None:
                 return self._llm
+
             self._ensure_model_file()
             try:
                 from llama_cpp import Llama
             except ModuleNotFoundError:
-                raise RuntimeError(
-                    f"llama-cpp-python is required. Run: python3 -m pip install -r {REQ_FILE}"
-                )
-            print(f"Loading local model from {self.model_path} (this may take a moment)...")
+                raise RuntimeError(f"llama-cpp-python is required. Run: python3 -m pip install -r {REQ_FILE}")
+
+            print(f"Loading {self.label} from {self.model_path} ...")
             self._llm = Llama(
                 model_path=str(self.model_path),
                 n_ctx=self.n_ctx,
@@ -154,7 +227,7 @@ class LlamaBackend:
             )
             return (result["choices"][0]["message"]["content"] or "").strip() or "(empty response)"
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"LLaMA inference error: {exc}")
+            raise RuntimeError(f"{self.label} inference error: {exc}")
 
 
 class OpenAIBackend:
@@ -191,14 +264,44 @@ class OpenAIBackend:
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=str(Path(__file__).resolve().parent / "web"), static_url_path="")
 
-    store = ConversationStore()
-    llama = LlamaBackend()
+    cache_dir = Path(os.getenv("GIMBLE_MODEL_CACHE_DIR", Path.home() / ".cache" / "gimble" / "models"))
+    n_ctx = int(os.getenv("GIMBLE_LLAMA_N_CTX", "2048"))
+    n_threads = int(os.getenv("GIMBLE_LLAMA_THREADS", str(max((os.cpu_count() or 2) - 1, 1))))
+
+    gptq4k = LlamaCppBackend(
+        label=DEFAULT_GPTQ4K_LABEL,
+        model_path=Path(os.getenv("GIMBLE_GPTQ4K_MODEL_PATH", cache_dir / DEFAULT_GPTQ4K_FILE)),
+        auto_download=os.getenv("GIMBLE_GPTQ4K_AUTO_DOWNLOAD", "1") == "1",
+        hf_repo=os.getenv("GIMBLE_GPTQ4K_HF_REPO", ""),
+        hf_file=os.getenv("GIMBLE_GPTQ4K_HF_FILE", ""),
+        direct_url=os.getenv("GIMBLE_GPTQ4K_URL", DEFAULT_GPTQ4K_URL),
+        n_ctx=n_ctx,
+        n_threads=n_threads,
+    )
+
+    llama = LlamaCppBackend(
+        label=DEFAULT_LLAMA_LABEL,
+        model_path=Path(os.getenv("GIMBLE_LLAMA_MODEL_PATH", cache_dir / "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")),
+        auto_download=os.getenv("GIMBLE_LLAMA_AUTO_DOWNLOAD", "1") == "1",
+        hf_repo=os.getenv("GIMBLE_LLAMA_HF_REPO", "bartowski/Meta-Llama-3-8B-Instruct-GGUF"),
+        hf_file=os.getenv("GIMBLE_LLAMA_HF_FILE", "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"),
+        direct_url=os.getenv("GIMBLE_LLAMA_URL", ""),
+        n_ctx=n_ctx,
+        n_threads=n_threads,
+    )
+
     gpt4 = OpenAIBackend()
 
     model_registry = {
+        "gptq4k": gptq4k,
         "llama": llama,
         "gpt4": gpt4,
     }
+    default_model = resolve_default_model()
+    if not model_registry[default_model].available():
+        default_model = "llama" if model_registry["llama"].available() else "gpt4"
+
+    store = ConversationStore(list(model_registry.keys()))
 
     @app.get("/")
     def index():
@@ -208,8 +311,9 @@ def create_app() -> Flask:
     def models():
         return jsonify(
             {
-                "default": "llama",
+                "default": default_model,
                 "models": [
+                    {"key": "gptq4k", "label": gptq4k.label, "available": gptq4k.available()},
                     {"key": "llama", "label": llama.label, "available": llama.available()},
                     {"key": "gpt4", "label": gpt4.label, "available": gpt4.available()},
                 ],
@@ -219,15 +323,25 @@ def create_app() -> Flask:
     @app.post("/api/chat")
     def chat():
         payload = request.get_json(silent=True) or {}
-        text = (payload.get("message") or "").strip()
-        model_key = (payload.get("model") or "llama").strip()
+        raw_text = (payload.get("message") or "").strip()
+        model_key = (payload.get("model") or default_model).strip()
+        explicit_system = (payload.get("system_prompt") or "").strip()
 
-        if not text:
-            return jsonify({"error": "message cannot be empty"}), 400
         if model_key not in model_registry:
             return jsonify({"error": f"unknown model: {model_key}"}), 400
 
-        history = store.append_user(model_key, text)
+        prefixed_system, user_text = split_system_prefix(raw_text)
+        system_prompt = explicit_system or prefixed_system
+        if system_prompt:
+            store.set_system_prompt(model_key, system_prompt)
+
+        user_text = user_text.strip()
+        if not user_text:
+            if system_prompt:
+                return jsonify({"reply": "System prompt updated for this model session."})
+            return jsonify({"error": "message cannot be empty"}), 400
+
+        history = store.append_user(model_key, user_text)
         backend = model_registry[model_key]
         try:
             reply = backend.chat(history)
