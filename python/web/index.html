@@ -546,6 +546,35 @@
 
     let activeModel = 'groq:openai/gpt-oss-120b';
 
+    const apiBase = (() => {
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        return `/${parts[0]}/${parts[1]}`;
+      }
+      return '';
+    })();
+
+    const apiPath = (path) => `${apiBase}${path}`;
+
+    async function fetchJSON(path, options = undefined) {
+      const res = await fetch(apiPath(path), options);
+      const raw = await res.text();
+      let data = null;
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = null;
+      }
+      if (!res.ok) {
+        const msg = (data && data.error) || raw || `Request failed (${res.status})`;
+        throw new Error(msg);
+      }
+      if (data === null) {
+        throw new Error('Server returned invalid JSON');
+      }
+      return data;
+    }
+
     if (window.marked) {
       marked.setOptions({
         gfm: true,
@@ -590,8 +619,7 @@
 
     async function loadSessionConfig() {
       try {
-        const res = await fetch('/api/session-config');
-        const data = await res.json();
+        const data = await fetchJSON('/api/session-config');
         cfgProfileEl.textContent = data.profile || '-';
         cfgNameEl.textContent = data.name || '-';
         cfgEmailEl.textContent = data.email || '-';
@@ -671,8 +699,7 @@
 
     async function loadModels() {
       try {
-        const res = await fetch('/api/models');
-        const data = await res.json();
+        const data = await fetchJSON('/api/models');
         const defaultKey = data.default || 'groq:openai/gpt-oss-120b';
         modelEl.innerHTML = '';
 
@@ -711,8 +738,7 @@
     async function refreshContextStatus() {
       if (!ingestStatusEl || !ingestDotEl || !ingestTextEl) return;
       try {
-        const res = await fetch("/api/context-status");
-        const data = await res.json();
+        const data = await fetchJSON('/api/context-status');
         const active = Boolean(data.active);
         ingestDotEl.classList.toggle("on", active);
         ingestDotEl.classList.toggle("off", !active);
@@ -736,20 +762,13 @@
       const typing = appendMessage('assistant', 'Thinking...');
 
       try {
-        const res = await fetch('/api/chat', {
+        const data = await fetchJSON('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text, model: activeModel })
         });
-        const data = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-          typing.className = 'bubble assistant error';
-          typing.textContent = data.error || `Request failed (${res.status})`;
-        } else {
-          typing.className = 'bubble assistant';
-          typing.innerHTML = renderMarkdown(data.reply || '(empty response)');
-        }
+        typing.className = 'bubble assistant';
+        typing.innerHTML = renderMarkdown(data.reply || '(empty response)');
       } catch (err) {
         typing.className = 'bubble assistant error';
         typing.textContent = `Network error: ${err.message}`;

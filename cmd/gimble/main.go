@@ -35,6 +35,9 @@ func run(args []string) error {
 	if err := platform.EnsureSupported(); err != nil {
 		return err
 	}
+	if err := ensureChatBrokerEnvDefaults(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize chat broker defaults: %v\n", err)
+	}
 
 	inSession := os.Getenv("GIMBLE_SESSION") == "1"
 
@@ -104,6 +107,9 @@ func runPythonChat(args []string) error {
 	if err := stopPreviousChatServer(); err != nil {
 		return err
 	}
+	if err := stopPreviousChatTunnel(); err != nil {
+		return err
+	}
 
 	pythonExe, err := findPythonInterpreter()
 	if err != nil {
@@ -126,7 +132,6 @@ func runPythonChat(args []string) error {
 	}
 	_ = ln.Close()
 
-	localhostURL := fmt.Sprintf("http://localhost:%d", actualPort)
 	loopbackURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
 
 	cmd := exec.Command(pythonExe, scriptPath, "--port", strconv.Itoa(actualPort))
@@ -157,7 +162,31 @@ func runPythonChat(args []string) error {
 		return fmt.Errorf("chat server failed to start: %w\nCheck logs: %s\nIf needed, run: %s", err, logPath, runtimeSetupHint(scriptPath))
 	}
 
-	fmt.Printf("Gimble Chat and Ask agents are running in the background. Chat with Gimble at %s or %s\n", makeHyperlink(loopbackURL), makeHyperlink(localhostURL))
+	fmt.Println("✓ Starting Gimble chat server")
+	fmt.Printf("✓ Local server running at %s (developer only)\n", makeHyperlink(loopbackURL))
+
+	stopSpinner := make(chan struct{})
+	doneSpinner := make(chan struct{})
+	go runTunnelSpinner(stopSpinner, doneSpinner, "Preparing public chat URL")
+
+	tunnelInfo, tunnelErr := startPublicChatTunnel(actualPort)
+	close(stopSpinner)
+	<-doneSpinner
+	fmt.Print("\r\x1b[2K")
+
+	if tunnelErr != nil {
+		fmt.Printf("Chat with Gimble Agents at: %s (local fallback)\n", makeHyperlink(loopbackURL))
+		fmt.Printf("Note: public tunnel unavailable: %v\n", tunnelErr)
+		return nil
+	}
+
+	fmt.Printf("Chat with Gimble Agents at: %s\n", makeHyperlink(tunnelInfo.PublicURL))
+	if tunnelInfo.BrokerEnabled && strings.TrimSpace(tunnelInfo.BrokerError) != "" {
+		fmt.Printf("(Temporary fallback while route warms up) %s\n", makeHyperlink(tunnelInfo.TunnelURL))
+	}
+	if !tunnelInfo.BrokerEnabled && strings.TrimSpace(tunnelInfo.TunnelURL) != "" {
+		fmt.Printf("(Fallback direct tunnel) %s\n", makeHyperlink(tunnelInfo.TunnelURL))
+	}
 
 	return nil
 }
@@ -294,21 +323,6 @@ func waitForChatServerReady(port int, pid int, timeout time.Duration) error {
 }
 
 func ensurePythonChatRuntime(pythonExe string, scriptPath string) (string, error) {
-	if err := checkPythonRuntimeImports(pythonExe); err == nil {
-		return pythonExe, nil
-	}
-
-	setupScript := filepath.Join(filepath.Dir(scriptPath), "setup_runtime.sh")
-	if _, err := os.Stat(setupScript); err == nil {
-		fmt.Println("Python chat runtime missing; installing required packages now...")
-		cmd := exec.Command("sh", setupScript)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("failed to auto-install chat runtime: %w", err)
-		}
-	}
-
 	if resolved, err := findPythonInterpreter(); err == nil {
 		pythonExe = resolved
 	}
@@ -410,6 +424,23 @@ func makeHyperlink(url string) string {
 	return "\x1b]8;;" + url + "\x1b\\" + url + "\x1b]8;;\x1b\\"
 }
 
+func runTunnelSpinner(stop <-chan struct{}, done chan<- struct{}, label string) {
+	defer close(done)
+	frames := []rune{'|', '/', '-', '\\'}
+	i := 0
+	for {
+		select {
+		case <-stop:
+			fmt.Print("\r")
+			return
+		default:
+			fmt.Printf("\r[%c] %s...", frames[i%len(frames)], label)
+			time.Sleep(110 * time.Millisecond)
+			i++
+		}
+	}
+}
+
 func printSessionIntro(activeName string, p profile.Profile) {
 	border := "=============================================================="
 	title := []string{
@@ -498,6 +529,36 @@ func isInteractiveTerminal() bool {
 	return true
 }
 
+func installPythonRuntimeDuringSetup() error {
+	scriptPath, err := findPythonChatServerScript()
+	if err != nil {
+		return err
+	}
+
+	setupScript := filepath.Join(filepath.Dir(scriptPath), "setup_runtime.sh")
+	if _, err := os.Stat(setupScript); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing runtime setup script: %s", setupScript)
+		}
+		return err
+	}
+
+	fmt.Println("Installing Python chat runtime (one-time setup)...")
+	cmd := exec.Command("sh", setupScript)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to install python runtime: %w", err)
+	}
+
+	pythonExe, err := findPythonInterpreter()
+	if err != nil {
+		return err
+	}
+	_, err = ensurePythonChatRuntime(pythonExe, scriptPath)
+	return err
+}
+
 func runSetupWizard() error {
 	if !isInteractiveTerminal() {
 		return fmt.Errorf("setup requires an interactive terminal")
@@ -576,6 +637,10 @@ func runSetupWizard() error {
 	}
 
 	if err := upsertChatEnv(openAIKey, groqKey); err != nil {
+		return err
+	}
+
+	if err := installPythonRuntimeDuringSetup(); err != nil {
 		return err
 	}
 
@@ -692,6 +757,32 @@ func saveKeyValueEnv(path string, values map[string]string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
+func ensureChatBrokerEnvDefaults() error {
+	path, err := chatEnvPath()
+	if err != nil {
+		return err
+	}
+	vals, err := loadKeyValueEnv(path)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	changed := false
+	if strings.TrimSpace(vals["GIMBLE_CHAT_PUBLIC_BASE"]) == "" {
+		vals["GIMBLE_CHAT_PUBLIC_BASE"] = defaultPublicChatBaseURL
+		changed = true
+	}
+	if strings.TrimSpace(vals["GIMBLE_CHAT_BROKER_ENDPOINT"]) == "" {
+		vals["GIMBLE_CHAT_BROKER_ENDPOINT"] = strings.TrimRight(defaultPublicChatBaseURL, "/") + "/api/register"
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	return saveKeyValueEnv(path, vals)
+}
+
 func upsertChatEnv(openAIKey, groqKey string) error {
 	path, err := chatEnvPath()
 	if err != nil {
@@ -713,7 +804,10 @@ func upsertChatEnv(openAIKey, groqKey string) error {
 			vals["GROQ_MODEL"] = "openai/gpt-oss-120b"
 		}
 	}
-	return saveKeyValueEnv(path, vals)
+	if err := saveKeyValueEnv(path, vals); err != nil {
+		return err
+	}
+	return ensureChatBrokerEnvDefaults()
 }
 func profileAccountProvider(p profile.Profile) string {
 	return profile.NormalizeProvider(p.Provider)

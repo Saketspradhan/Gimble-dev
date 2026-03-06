@@ -110,6 +110,29 @@ gim chat
 
 By default, `gim chat` uses an automatically selected open localhost port.
 
+### Public tunnel mode (Cloudflare)
+
+When you run `gim chat`, Gimble now attempts to:
+
+- start a local Flask server
+- launch a Cloudflare Tunnel (`cloudflared`) automatically
+- print a live public URL
+
+If a chat broker is configured, the URL format becomes:
+
+`https://chat.gimble.dev/<username>/<session_id>`
+
+Gimble now auto-generates and persists these values in local `chat.env` (macOS + Linux) on first run:
+
+- `GIMBLE_CHAT_PUBLIC_BASE` (defaults to `https://chat.gimble.dev`)
+- `GIMBLE_CHAT_BROKER_ENDPOINT` (defaults to `https://chat.gimble.dev/api/register`)
+- No user token required; broker registration is verified through nonce proof (`/__gimble_proof`).
+If the worker route is not deployed yet, Gimble falls back to a direct `*.trycloudflare.com` public link.
+
+Cloudflare Worker broker templates are provided in `infra/chat-broker/`.
+
+
+
 Gimble session logs are written in live-updating, sanitized plain text with timestamps under:
 
 - Linux: `~/.config/gimble/session-logs/`

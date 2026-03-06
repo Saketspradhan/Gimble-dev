@@ -4,11 +4,8 @@ import errno
 import os
 import platform
 import re
-import shutil
-import tempfile
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -47,12 +44,6 @@ DEFAULT_MODEL_KEY = f"groq:{DEFAULT_GROQ_MODEL}"
 
 EXPERIMENTAL_GPTQ_KEY = "local:gptq-4k-experimental"
 EXPERIMENTAL_GPTQ_LABEL = "GPT-Q 4K (Experimental, developer-only)"
-DEFAULT_GPTQ4K_FILE = "gptq-4k-quantized.gguf"
-DEFAULT_GPTQ4K_URL = (
-    "https://huggingface.co/bartowski/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/"
-    "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
-)
-
 LOG_INGEST_INTERVAL_SECONDS = 15.0
 MAX_CONTEXT_CHARS = 24000
 MAX_RECENT_LINES = 800
@@ -265,16 +256,6 @@ def split_system_prefix(text: str) -> Tuple[str, str]:
     return system_prompt, user_text
 
 
-def is_valid_gguf(path: Path) -> bool:
-    if not path.exists() or path.stat().st_size < 4:
-        return False
-    try:
-        with path.open("rb") as f:
-            magic = f.read(4)
-        return magic == b"GGUF"
-    except OSError:
-        return False
-
 
 class ConversationStore:
     def __init__(self, model_keys: List[str]) -> None:
@@ -309,86 +290,6 @@ class ConversationStore:
         if len(msgs) > 31:
             self._messages[model_key] = [msgs[0]] + msgs[-30:]
 
-
-class LlamaCppBackend:
-    def __init__(self, *, model_path: Path, auto_download: bool, direct_url: str, n_ctx: int, n_threads: int) -> None:
-        self.model_path = model_path
-        self.auto_download = auto_download
-        self.direct_url = direct_url
-        self.n_ctx = n_ctx
-        self.n_threads = n_threads
-        self._lock = threading.Lock()
-        self._llm = None
-
-    def available(self) -> bool:
-        return self.model_path.exists() or self.auto_download
-
-    def _download_via_url(self) -> bool:
-        if not self.direct_url:
-            return False
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as tmp:
-            tmp_path = Path(tmp.name)
-        try:
-            with urllib.request.urlopen(self.direct_url) as src, tmp_path.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            shutil.move(str(tmp_path), str(self.model_path))
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-        return True
-
-    def _ensure_model_file(self) -> None:
-        self.model_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if self.model_path.exists() and not is_valid_gguf(self.model_path):
-            self.model_path.unlink(missing_ok=True)
-
-        if is_valid_gguf(self.model_path):
-            return
-
-        if not self.auto_download:
-            raise RuntimeError(f"Model missing at {self.model_path}")
-
-        if self._download_via_url() and is_valid_gguf(self.model_path):
-            return
-
-        self.model_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Could not acquire a valid GGUF model for {EXPERIMENTAL_GPTQ_LABEL}. "
-            f"Set {self.model_path} manually or configure GIMBLE_GPTQ4K_URL."
-        )
-
-    def _ensure_loaded(self):
-        with self._lock:
-            if self._llm is not None:
-                return self._llm
-
-            self._ensure_model_file()
-            try:
-                from llama_cpp import Llama
-            except ModuleNotFoundError:
-                raise RuntimeError(f"llama-cpp-python is required for GPT-Q 4K experimental model. Run: python3 -m pip install -r {Path(__file__).resolve().parent / 'requirements-optional-local.txt'}")
-
-            self._llm = Llama(
-                model_path=str(self.model_path),
-                n_ctx=self.n_ctx,
-                n_threads=self.n_threads,
-                n_gpu_layers=0,
-                verbose=False,
-            )
-            return self._llm
-
-    def chat(self, messages: List[Dict[str, str]]) -> str:
-        llm = self._ensure_loaded()
-        try:
-            result = llm.create_chat_completion(
-                messages=messages,
-                max_tokens=512,
-                temperature=0.7,
-            )
-            return (result["choices"][0]["message"]["content"] or "").strip() or "(empty response)"
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"{EXPERIMENTAL_GPTQ_LABEL} inference error: {exc}")
 
 
 class OpenAIBackend:
@@ -465,13 +366,6 @@ def create_app() -> Flask:
 
     openai_backend = OpenAIBackend()
     groq_backend = GroqBackend()
-    gptq_backend = LlamaCppBackend(
-        model_path=Path(os.getenv("GIMBLE_GPTQ4K_MODEL_PATH", Path.home() / ".cache" / "gimble" / "models" / DEFAULT_GPTQ4K_FILE)),
-        auto_download=os.getenv("GIMBLE_GPTQ4K_AUTO_DOWNLOAD", "1") == "1",
-        direct_url=os.getenv("GIMBLE_GPTQ4K_URL", DEFAULT_GPTQ4K_URL),
-        n_ctx=int(os.getenv("GIMBLE_LLAMA_N_CTX", "2048")),
-        n_threads=int(os.getenv("GIMBLE_LLAMA_THREADS", str(max((os.cpu_count() or 2) - 1, 1)))),
-    )
 
     model_options = []
     for model in GROQ_MODELS:
@@ -497,7 +391,7 @@ def create_app() -> Flask:
         {
             "key": EXPERIMENTAL_GPTQ_KEY,
             "label": EXPERIMENTAL_GPTQ_LABEL,
-            "available": gptq_backend.available(),
+            "available": False,
             "provider": "local",
         }
     )
@@ -537,6 +431,14 @@ def create_app() -> Flask:
     @app.get("/api/session-config")
     def session_cfg():
         return jsonify(session_config)
+
+
+    @app.get("/__gimble_proof")
+    def gimble_proof():
+        nonce = (request.args.get("nonce") or "").strip()
+        if not nonce:
+            return "missing nonce", 400
+        return nonce, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
     @app.get("/api/models")
     def models():
@@ -584,7 +486,7 @@ def create_app() -> Flask:
             elif provider == "openai":
                 reply = openai_backend.chat(request_messages, model_name)
             elif model_key == EXPERIMENTAL_GPTQ_KEY:
-                reply = gptq_backend.chat(request_messages)
+                return jsonify({"error": "GPT-Q 4K is an experimental placeholder and is not selectable in this build."}), 400
             else:
                 return jsonify({"error": f"unsupported provider: {provider}"}), 400
         except Exception as exc:  # noqa: BLE001
