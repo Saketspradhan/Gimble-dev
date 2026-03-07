@@ -142,6 +142,9 @@ func runPythonChat(args []string) error {
 	if *port < 0 || *port > 65535 {
 		return fmt.Errorf("invalid port: %d", *port)
 	}
+	if shouldUseCloudMode() {
+		return runCloudChat()
+	}
 	if existingURL := activeChatPublicURL(); existingURL != "" {
 		fmt.Printf("Gimble Chat Agent is already running. Reuse this live link: %s\n", makeHyperlink(existingURL))
 		return nil

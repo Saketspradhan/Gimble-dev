@@ -301,10 +301,16 @@ func unregisterPublicSession(state tunnelState) error {
 		return nil
 	}
 
-	baseURL := strings.TrimRight(chatBrokerSetting("GIMBLE_CHAT_PUBLIC_BASE", defaultPublicChatBaseURL), "/")
-	endpoint := chatBrokerSetting("GIMBLE_CHAT_BROKER_UNREGISTER_ENDPOINT", baseURL+"/api/unregister")
+	endpoint := ""
+	if cloudBase := strings.TrimSpace(cloudAPIBase()); cloudBase != "" {
+		endpoint = strings.TrimRight(cloudBase, "/") + "/v1/sessions/disconnect"
+	} else {
+		baseURL := strings.TrimRight(chatBrokerSetting("GIMBLE_CHAT_PUBLIC_BASE", defaultPublicChatBaseURL), "/")
+		endpoint = chatBrokerSetting("GIMBLE_CHAT_BROKER_UNREGISTER_ENDPOINT", baseURL+"/api/unregister")
+	}
 	payload := map[string]any{"username": username, "session_id": sessionID}
 	body, _ := json.Marshal(payload)
+	token := cloudAPIToken()
 
 	if _, err := exec.LookPath("curl"); err == nil {
 		cmd := exec.Command(
@@ -314,6 +320,7 @@ func unregisterPublicSession(state tunnelState) error {
 			"-H", "Content-Type: application/json",
 			"-H", "Accept: application/json",
 			"--max-time", "6",
+			"-H", "X-Gimble-Token: "+token,
 			"--data", string(body),
 			"--write-out", "\n%{http_code}",
 			endpoint,
@@ -340,6 +347,9 @@ func unregisterPublicSession(state tunnelState) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Gimble; +https://gimble.dev)")
+	if token != "" {
+		req.Header.Set("X-Gimble-Token", token)
+	}
 	resp, err := (&http.Client{Timeout: 6 * time.Second}).Do(req)
 	if err != nil {
 		return err

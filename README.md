@@ -85,6 +85,28 @@ Broker/worker code is in:
 
 - `infra/chat-broker/`
 
+## Cloud SaaS Mode (Private Backend)
+
+Gimble can run in cloud mode where chat + context compilation live on your private backend.
+
+Set in local `chat.env`:
+
+```env
+GIMBLE_CLOUD_API_BASE=https://chat.gimble.dev
+GIMBLE_CLOUD_API_TOKEN=<server-token>
+```
+
+In this mode, `gim chat`:
+
+- creates a cloud session (`/v1/sessions`)
+- prints `https://chat.gimble.dev/<username>/<session_id>`
+- starts background uploader from local sanitized session log to `/v1/events:ingest`
+
+Private backend scaffold is at:
+
+- `/Users/saketpradhan/Desktop/gimble-cloud`
+
+
 ## Updating Gimble
 
 Always install latest release tag:
