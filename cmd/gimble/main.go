@@ -24,6 +24,9 @@ import (
 
 var version = "dev"
 
+const defaultNamedTunnelName = "gimble-chat-named"
+const defaultNamedTunnelHostname = "origin-chat.gimble.dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -713,7 +716,7 @@ func runSetupWizard() error {
 	if err != nil {
 		return err
 	}
-	rosProfileChoice, err := promptChoiceInline(reader, "ROS profile", []string{"ROS1 / noetic", "ROS2 / humble", "ROS2 / jazzy", "ROS2 / rolling"}, 0, true)
+	rosProfileChoice, err := promptChoiceMultiline(reader, "ROS profile", []string{"ROS1 / noetic", "ROS2 / humble", "ROS2 / jazzy", "ROS2 / rolling"}, true)
 	if err != nil {
 		return err
 	}
@@ -741,7 +744,7 @@ func runSetupWizard() error {
 	if err != nil {
 		return err
 	}
-	systemPromptChoice, err := promptChoiceInline(reader, "System prompt profile", []string{"debug-heavy", "concise", "incident-response"}, 0, true)
+	systemPromptChoice, err := promptChoiceMultiline(reader, "System prompt profile", []string{"debug-heavy", "concise", "incident-response"}, true)
 	if err != nil {
 		return err
 	}
@@ -788,6 +791,13 @@ func runSetupWizard() error {
 
 	if err := upsertChatEnv(openAIKey, groqKey); err != nil {
 		return err
+	}
+
+	fmt.Println()
+	printSetupSection("Tunnel")
+	fmt.Println("Checking Cloudflare named tunnel configuration...")
+	if err := bootstrapNamedTunnelDuringSetup(); err == nil {
+		fmt.Println("Named tunnel configuration ready.")
 	}
 
 	fmt.Println()
@@ -876,6 +886,33 @@ func promptChoiceInline(reader *bufio.Reader, label string, options []string, de
 			if defaultChoice >= 1 && defaultChoice <= len(options) {
 				return defaultChoice, nil
 			}
+		}
+		n, err := strconv.Atoi(v)
+		if err == nil && n >= 1 && n <= len(options) {
+			return n, nil
+		}
+		fmt.Println("Invalid selection.")
+	}
+}
+
+func promptChoiceMultiline(reader *bufio.Reader, label string, options []string, allowSkip bool) (int, error) {
+	fmt.Printf("%s\n", label)
+	for i, opt := range options {
+		fmt.Printf("  %d) %s\n", i+1, opt)
+	}
+	for {
+		if allowSkip {
+			fmt.Printf("Select [1-%d] (Enter to skip): ", len(options))
+		} else {
+			fmt.Printf("Select [1-%d]: ", len(options))
+		}
+		v, err := reader.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+		v = strings.TrimSpace(v)
+		if v == "" && allowSkip {
+			return 0, nil
 		}
 		n, err := strconv.Atoi(v)
 		if err == nil && n >= 1 && n <= len(options) {
@@ -997,6 +1034,64 @@ func upsertChatEnv(openAIKey, groqKey string) error {
 	}
 	return ensureChatBrokerEnvDefaults()
 }
+func hasCloudflareTunnelAuth() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	cert := filepath.Join(home, ".cloudflared", "cert.pem")
+	_, err = os.Stat(cert)
+	return err == nil
+}
+
+func containsIgnoreCase(haystack, needle string) bool {
+	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
+}
+
+func bootstrapNamedTunnelDuringSetup() error {
+	cloudflaredPath, err := ensureCloudflaredBinary()
+	if err != nil {
+		return nil
+	}
+	if !hasCloudflareTunnelAuth() {
+		// Non-blocking: setup remains usable with quick tunnels.
+		return nil
+	}
+
+	listOut, listErr := exec.Command(cloudflaredPath, "tunnel", "list").CombinedOutput()
+	if listErr != nil {
+		// Non-blocking fallback.
+		return nil
+	}
+	if !containsIgnoreCase(string(listOut), defaultNamedTunnelName) {
+		if out, err := exec.Command(cloudflaredPath, "tunnel", "create", defaultNamedTunnelName).CombinedOutput(); err != nil {
+			if !containsIgnoreCase(string(out), "already") {
+				return nil
+			}
+		}
+	}
+
+	if out, err := exec.Command(cloudflaredPath, "tunnel", "route", "dns", defaultNamedTunnelName, defaultNamedTunnelHostname).CombinedOutput(); err != nil {
+		if !(containsIgnoreCase(string(out), "already") || containsIgnoreCase(string(out), "exists")) {
+			return nil
+		}
+	}
+
+	path, err := chatEnvPath()
+	if err != nil {
+		return nil
+	}
+	vals, err := loadKeyValueEnv(path)
+	if err != nil {
+		return nil
+	}
+	vals["GIMBLE_NAMED_TUNNEL_NAME"] = defaultNamedTunnelName
+	vals["GIMBLE_NAMED_TUNNEL_HOSTNAME"] = defaultNamedTunnelHostname
+	vals["GIMBLE_NAMED_TUNNEL_URL"] = "https://" + defaultNamedTunnelHostname
+	_ = saveKeyValueEnv(path, vals)
+	return nil
+}
+
 func profileAccountProvider(p profile.Profile) string {
 	return profile.NormalizeProvider(p.Provider)
 }
