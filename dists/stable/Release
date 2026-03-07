@@ -1,0 +1,32 @@
+Architectures: amd64 arm64
+Codename: stable
+Components: main
+Date: Sat, 07 Mar 2026 08:32:05 +0000
+Description: gimble apt repository
+Label: gimble
+Origin: gimble
+Suite: stable
+MD5Sum:
+ c5db48e7af1b47cf740c9bb64e0d5c5f              177 Release
+ ac74ac21565cfd01d2d9f30ec75d5134              438 main/binary-amd64/Packages
+ c0cf33f3a7e9b9f7b8e3d806dd0d05bd              338 main/binary-amd64/Packages.gz
+ d68591179aaf7c55ae08a25b4e781097              438 main/binary-arm64/Packages
+ 7597944a886a55b5cabb4b11a8f5c02a              340 main/binary-arm64/Packages.gz
+SHA1:
+ 8b8121d9f3866c0efb4e4f871f75e93d9d1404ff              177 Release
+ 4b09f3d8087d5d4437643f800ee7af13b2ad8e51              438 main/binary-amd64/Packages
+ 7c38375efa20956fc9c03c0d5537a4397db83bee              338 main/binary-amd64/Packages.gz
+ 0ec929ac6c05b2c957024ede08ffb62c5ce489eb              438 main/binary-arm64/Packages
+ a1d09c75397c914f428f22afa9f2ee713fa44b02              340 main/binary-arm64/Packages.gz
+SHA256:
+ 48dbe97dc61d4b88d07a6eea70e804d050af4c7167eb5e4ab23d1486f20b0d1b              177 Release
+ 89caf796a0cab36d7f50c161b23ccd8570d37999c91035f947e32193e9de6005              438 main/binary-amd64/Packages
+ 05271e1cd00415d9bdece099755cf7ae1056003a64b144acf5d7e00def62b610              338 main/binary-amd64/Packages.gz
+ e072ae48abd0754df00bf45d4b52e9de59de673f86860bb57d88d0f132dd178c              438 main/binary-arm64/Packages
+ d626b26ce5ab0d3feada1777745b6c27673ea6a908b5d1752f08ce4d483abe81              340 main/binary-arm64/Packages.gz
+SHA512:
+ 6523b49977e9c95fa972d9338b4f204b818b915bc0620523fa5fc610e7d77378d76aca9c8b30cef6341af12d6f379eb5357732eed8fe96ed8ff12850e68733a3              177 Release
+ a3de829bf1f08e314d4495dfaa7ee14d006b339e5edd4cac03d77f28dc42faf961d484d75e263d60cfac13a2251612c0daf6959f490679e0f9cb96ff67d39015              438 main/binary-amd64/Packages
+ 23b5ac0a669a0dc99658f554112d523e8d6b2e65d88ec81e718cc32b402c510ec947df95f4a4048e06a79d0f4154c0298c34d2fd548ff98c99e9613ff07b62d9              338 main/binary-amd64/Packages.gz
+ 8c68612fae399aa170c5651be75209660f89db9bc7db00ec9c5f93e8520d9403e20fc8f96519c46058c3611d3de984c7cd57a4c25477b71d951fa79a4fcc2e64              438 main/binary-arm64/Packages
+ 70082f2dcd19f3b6b8a57778a47f2977ce409cfe946101d3c4f02065d4d847117cb1ecedb002c9296ed5180a8470aed4ca30bc1a9048a176d03b34b80bc397eb              340 main/binary-arm64/Packages.gz

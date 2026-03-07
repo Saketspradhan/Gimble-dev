@@ -1,0 +1,15 @@
+Package: gimble
+Version: 0.1.22
+Architecture: amd64
+Maintainer: Gimble Team <dev@gimble.dev>
+Depends: python3, python3-venv
+Filename: pool/main/g/gimble/gimble_0.1.22_amd64.deb
+Size: 4368392
+MD5sum: a73433a12680cd8b1b77e78028f1e0b9
+SHA1: 2ec011d20e61dbb20d8443605951e683e8c7169e
+SHA256: 542a26e3be9683caf2be9fa70b76379aa9d586afdbbbb6371e2d7241d8e0f0ec
+Section: utils
+Priority: optional
+Description: Gimble CLI
+ Gimble command-line tool.
+
