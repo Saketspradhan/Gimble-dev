@@ -1,4 +1,4 @@
-# Gimble
+# Gimble.dev
 
 Gimble is a cross-platform CLI for robotics debugging and observability on macOS and Linux.
 
