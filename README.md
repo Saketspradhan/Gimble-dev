@@ -1,20 +1,28 @@
 # Gimble
 
-Gimble is a cross-platform CLI for Linux and macOS.
+Gimble is a cross-platform CLI for robotics debugging and observability on macOS and Linux.
 
-## Install
+## Install (Latest Release, Recommended)
 
-### macOS (Homebrew)
+Use this for first-time install and upgrades. It always resolves the newest GitHub release tag at install time (no hardcoded version in the command).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Saketspradhan/Gimble-dev/main/scripts/install_latest.sh | bash
+```
+
+Verify:
+
+```bash
+gimble --version
+```
+
+## Package Manager Installs
+
+### macOS (Homebrew tap)
 
 ```bash
 brew tap saketspradhan/gimble https://github.com/Saketspradhan/Gimble-dev
 brew install gimble
-```
-
-Start Gimble:
-
-```bash
-gimble
 ```
 
 ### Linux (APT)
@@ -36,279 +44,85 @@ sudo apt update
 sudo apt install gimble
 ```
 
-Start Gimble:
+## First Run
 
 ```bash
 gimble
 ```
 
-## Local Chat (inside Gimble session)
+On first launch, Gimble runs an interactive setup wizard and stores local config/secrets under:
 
-`gim chat` runs a **Python** backend with two primary providers: **Groq** and **OpenAI API**.
+- macOS: `~/Library/Application Support/gimble/`
+- Linux: `~/.config/gimble/`
 
-When runtime dependencies are missing, Gimble auto-installs the Python chat runtime and only prints the chat URL after the server is actually reachable.
+## Session Commands
 
-Default selection:
+Inside a Gimble session, use:
 
-- `openai/gpt-oss-120b` via Groq
+- `gim chat` start chat server + public link
+- `gim disconnect` stop chat/tunnel and ingestion, stay in Gimble session
+- `gim exit` stop chat/tunnel (fail-safe) and exit Gimble session
 
-Browser dropdown models:
+## Chat Models
 
-- Groq:
-  - `openai/gpt-oss-120b`
-  - `openai/gpt-oss-20b`
-  - `openai/gpt-oss-safeguard-20b`
-  - `qwen/qwen3-32b`
-  - `llama-3.1-8b-instant`
-  - `llama-3.3-70b-versatile`
-- OpenAI API:
-  - `gpt-4o-mini`
-  - `gpt-4.1-mini`
-  - `gpt-4.1-nano`
-- Experimental local option:
-  - `GPT-Q 4K (Experimental, developer-only)`
+Default provider/model:
 
-### 1. Install the Gimble Python runtime (one-time)
+- Groq: `openai/gpt-oss-120b`
 
-From the repo root:
+Available in UI:
 
-```bash
-./python/setup_runtime.sh
-```
+- Groq: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `openai/gpt-oss-safeguard-20b`, `qwen/qwen3-32b`, `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`
+- OpenAI: `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`
+- `GPT-Q 4K` is shown as experimental placeholder (non-selectable)
 
-### 2. Configure API keys
+## Public Chat Tunnel
 
-Recommended: run `gimble setup` and paste keys during the wizard.
-
-Manual (optional):
-
-```bash
-mkdir -p "$HOME/Library/Application Support/gimble"   # macOS
-# mkdir -p "$HOME/.config/gimble"                    # Linux
-
-cat > "$HOME/Library/Application Support/gimble/chat.env" <<'ENV'
-GROQ_API_KEY=<your_groq_key>
-GROQ_MODEL=openai/gpt-oss-120b
-OPENAI_API_KEY=<your_openai_key>
-OPENAI_MODEL=gpt-4o-mini
-ENV
-```
-
-Get keys from:
-
-- OpenAI: https://platform.openai.com/api-keys
-- Groq: https://console.groq.com/keys
-
-### 3. Start chat
-
-```bash
-gimble
-# now inside Gimble session
-
-gim chat
-```
-
-By default, `gim chat` uses an automatically selected open localhost port.
-
-### Public tunnel mode (Cloudflare)
-
-When you run `gim chat`, Gimble now attempts to:
-
-- start a local Flask server
-- launch a Cloudflare Tunnel (`cloudflared`) automatically
-- print a live public URL
-
-If a chat broker is configured, the URL format becomes:
+`gim chat` can expose your local session as:
 
 `https://chat.gimble.dev/<username>/<session_id>`
 
-Gimble now auto-generates and persists these values in local `chat.env` (macOS + Linux) on first run:
+Broker/worker code is in:
 
-- `GIMBLE_CHAT_PUBLIC_BASE` (defaults to `https://chat.gimble.dev`)
-- `GIMBLE_CHAT_BROKER_ENDPOINT` (defaults to `https://chat.gimble.dev/api/register`)
-- No user token required; broker registration is verified through nonce proof (`/__gimble_proof`).
-If the worker route is not deployed yet, Gimble falls back to a direct `*.trycloudflare.com` public link.
+- `infra/chat-broker/`
 
-Cloudflare Worker broker templates are provided in `infra/chat-broker/`.
+## Updating Gimble
 
-
-
-Gimble session logs are written in live-updating, sanitized plain text with timestamps under:
-
-- Linux: `~/.config/gimble/session-logs/`
-- macOS: `~/Library/Application Support/gimble/session-logs/
-Use `gim chat --port <port>` only when you want to pin a specific port.
-
-### System prompt support
-
-You can set explicit system prompts in two ways:
-
-1. API field `system_prompt` in `/api/chat` payload.
-2. Message prefix in chat input:
-
-```text
-System: You are terse and technical.
-User: Explain mmap in one paragraph.
-```
-
-A `System: ...` prompt is persisted per selected model session and honored for future turns.
-
-`gimble chat` is intentionally disabled outside session.
-
-## First Run (Setup Wizard)
-
-On first launch, Gimble automatically starts an interactive setup wizard:
+Always install latest release tag:
 
 ```bash
-gimble
+curl -fsSL https://raw.githubusercontent.com/Saketspradhan/Gimble-dev/main/scripts/install_latest.sh | bash
 ```
 
-You can run it manually anytime:
+
+## Maintainer Automation
+
+On each `v*` tag push, GitHub Actions now auto-updates `Formula/gimble.rb` to that tag + tarball SHA256:
+
+- workflow: `.github/workflows/update-homebrew-formula.yml`
+- helper script: `scripts/update-homebrew-formula.sh`
+
+This keeps Homebrew installs aligned with the newest release without manual formula edits.
+
+## Remove Gimble Completely
 
 ```bash
-gimble setup
+brew uninstall --zap --force gimble || true
+brew untap saketspradhan/gimble || true
+rm -rf "$HOME/Library/Application Support/gimble" "$HOME/.config/gimble" "$HOME/.cache/gimble" "$HOME/.local/share/gimble" "$HOME/.gimble"
 ```
 
-The wizard walks through:
-
-- Name and email
-- Account provider: GitHub or GitLab
-- Account username
-- OpenAI API key (optional; can skip)
-- Groq API key (optional; can skip)
-
-Keys are written only to your local `chat.env` file with `0600` permissions:
-
-- Linux: `~/.config/gimble/chat.env`
-- macOS: `~/Library/Application Support/gimble/chat.env`
-
-Gimble does not push these keys to GitHub or transmit them outside your local runtime.
-
-## Profile and Config Management
-
-Gimble stores profile config at:
-
-- Linux: `~/.config/gimble/config.json`
-- macOS: `~/Library/Application Support/gimble/config.json`
-
-Useful profile commands:
-
-```bash
-gimble profile list
-gimble profile show
-gimble profile set --profile default --email new@email.com
-gimble profile use default
-gimble profile delete oldprofile
-```
-
-Inside a Gimble session, active profile data is exported as:
-
-- `GIMBLE_PROFILE`
-- `GIMBLE_USER_NAME`
-- `GIMBLE_USER_EMAIL`
-- `GIMBLE_USER_GITHUB`
-- `GIMBLE_USER_ACCOUNT_PROVIDER`
-
-## Build from Source
+## Build From Source
 
 ```bash
 make build
 ```
 
-Release binaries:
+Linux/macOS release artifacts:
 
 ```bash
 make build-linux
 make build-macos
 ```
-
-Artifacts are written to `dist/`.
-
-## Build Debian Packages Locally
-
-```bash
-make package-deb VERSION=0.1.0
-```
-
-This creates:
-
-- `dist/gimble_0.1.0_amd64.deb`
-- `dist/gimble_0.1.0_arm64.deb`
-
-## Release and Publish Workflow (Maintainer)
-
-Workflow file:
-
-- `.github/workflows/publish-apt.yml`
-
-On tag push (`v*`), the workflow:
-
-1. Builds Linux binaries and `.deb` packages.
-2. Generates APT repo metadata (`dists/stable`, `pool/`).
-3. Signs metadata (`InRelease`, `Release.gpg`).
-4. Publishes APT repository to `gh-pages`.
-5. Creates GitHub Release and uploads `.deb` artifacts.
-
-Required GitHub Actions secrets:
-
-- `APT_GPG_PRIVATE_KEY_B64`
-- `APT_GPG_KEY_ID`
-- `APT_GPG_PASSPHRASE`
-
-Key setup details:
-
-- `scripts/apt/KEY_SETUP.md`
-
-Publish a release:
-
-```bash
-git tag v0.1.14
-git push origin v0.1.14
-```
-
-## Updating Gimble
-
-### Linux
-
-```bash
-sudo apt update
-sudo apt upgrade gimble
-```
-
-### macOS
-
-```bash
-brew update
-brew upgrade gimble
-```
-
-## Troubleshooting
-
-### `E: ... does not have a Release file`
-
-Your Pages-hosted APT repo is not available yet.
-
-Check:
-
-- `https://saketspradhan.github.io/Gimble-dev/dists/stable/Release` returns `200`
-- latest `Publish APT Repository` workflow run is green
-- GitHub Pages is enabled for branch `gh-pages` root
-
-### `base64: invalid input` during signing step
-
-`APT_GPG_PRIVATE_KEY_B64` secret is malformed.
-
-Regenerate exactly:
-
-```bash
-gpg --armor --export-secret-keys <KEY_ID> | base64 | tr -d '\n'
-```
-
-Paste that single-line value as the secret.
-
-### Workflow warning: missing `go.sum`
-
-This is a cache warning from `actions/setup-go`; it does not block publishing.
 
 ## License
 
